@@ -282,4 +282,16 @@ test("public cheap-model writes", async () => {
   assert.equal((await get("/api/stats")).data.public_writes, "cheap");
 });
 
+test("a fork before the parent's first commit starts from the base repo, not the parent's HEAD", async () => {
+  const r = await newSession();
+  const root = r.data.root_branch_id as string;
+  await waitDone(root);
+  const f = await j("POST", `/api/branches/${root}/fork`, { step_index: 1, model_id: cheapestModel().id, edited_task_prompt: "again" }, KEY);
+  assert.equal(f.status, 201, JSON.stringify(f.data));
+  const fid = f.data.branches[0].id as string;
+  assert.equal((await waitDone(fid)).status, "done");
+  const files0 = (await get(`/api/branches/${fid}/steps/1/files`)).data;
+  assert.ok(!files0.files.some((x: { path: string }) => x.path === "OUT.md"), "parent's OUT.md must not exist at the fork point");
+});
+
 test("fake client sanity", () => { assert.ok(new FakeModelClient([])); });
