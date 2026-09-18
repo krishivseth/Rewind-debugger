@@ -150,3 +150,49 @@ Choices the spec left open, and what this codebase does about them.
     bundle now fails the fork with a clear message instead of silently cloning the base repo.
 49. **Seed session titles are for humans**: "Five identical forks of one bug fix", "Same task, three
     models", "Add a feature to a small Flask app".
+
+## Railway showcase
+
+50. **The Railway deployment is a read-only showcase.** `REWIND_READ_ONLY=1` and
+    `REWIND_PUBLIC_WRITES=off` on the service: no sessions, forks, cancels, deletes or notes; the UI
+    hides those controls and says the runs are recorded. Five curated sessions, fourteen branches,
+    recorded with DeepSeek V4 Flash roots and GPT-5.4 Mini and Gemini 3.8 Flash comparison forks,
+    live in its Postgres and volume. The Replit deployment of the same code stays interactive.
+51. **Phones show one pane at a time.** Below the md breakpoint the session page keeps the scrubber
+    on top and switches the body between Steps, Files and Branches with a bar at the bottom; diff and
+    compare modes jump to Steps. Stacking all three panes gave each a sliver of a 780px screen. The
+    top bar drops the subtitle and token readout on small screens and the home search fills the bar.
+52. **Egress.** Responses are gzipped in-process (except SSE) because the platform meters bytes
+    leaving the container, not what its edge later compresses; hashed assets under `/assets` are
+    `immutable, max-age=1y` and `index.html` is `no-cache`; Monaco is built from the core editor plus
+    the ten languages the seed repos use instead of the full package, 4.0 MB down to 2.7 MB raw.
+    A first visit that opens a file costs about 0.8 MB of egress instead of 4.3 MB; a return visit
+    costs a few kilobytes of API JSON.
+53. **Sign in with GitHub** (`REWIND_PUBLIC_WRITES=signed_in`). Keyless writes need a GitHub
+    session: the OAuth token is used once to read the profile and dropped; the session is an
+    HMAC-signed cookie with id, login and avatar, 30 days. Signed-in visitors get the cheap model,
+    a per-account quota (the same ten an hour as a key, keyed by GitHub id instead of IP), the shared
+    public daily budget, and `PUBLIC_MAX_MODEL_CALLS` (15) instead of 30. The access key still
+    unlocks everything. Chosen over Clerk (the original Replit sign-in) because it needs one OAuth
+    app and no vendor, and over a CAPTCHA because an accountable account deters bots better.
+54. **Two Railway environments.** `production` is the live showcase; `staging` gets its own
+    Postgres and volume for testing deploys of the same code before they reach production.
+55. **Forks before the first commit reset to the base commit.** A fork whose boundary precedes any
+    commit used to inherit the parent's finished worktree, so "five identical forks from step 3"
+    were really forks of the solved repo and reported the tests already passing. The worktree now
+    resets to the repository's root commit in that case. Regression test added; the two affected
+    showcase sessions were re-recorded.
+56. **The call cap ends with a wrap-up, not a failure.** When a branch reaches its model-call limit
+    the last call is made without tools and asks for a summary; the branch ends `done` with a note
+    saying it stopped at the limit. A 15-call run that had just made its tests pass used to be
+    marked failed for running them once more. Keyless branches get 20 calls (was 15); the key gets 30.
+57. **The blank seed repo ships one passing placeholder test**, so pytest exits 0 before the agent
+    has written anything; "no tests ran" (exit 5) read as failure and sent models down the wrong path.
+58. **Stop reason is separate from status.** Every branch records why it stopped: `completed`,
+    `call_limit`, `loop`, `token_budget`, `wall_clock`, `cancelled`, `provider_error`, `crash`. The
+    four limits are soft stops: the run makes one tool-less wrap-up call for a summary and ends
+    `done`, the UI shows a "paused" badge with the reason, and a Continue button forks from the last
+    step with the same model. Only provider errors and crashes are `failed`. A visitor's run hitting
+    a budget is a pause they can resume, not a red failure on a demo.
+59. **The system prompt covers the no-tests case**: write a small pytest file; "no tests ran" is not
+    a failure. Both this and the placeholder test came from watching a signed-in run on staging.

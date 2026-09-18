@@ -11,6 +11,7 @@ import { cheapestModel, settings } from "../src/lib/config";
 import * as scheduler from "../src/lib/scheduler";
 import { branchLimiter } from "../src/middlewares/access-key";
 import { sandboxPythonStatus, setSandboxBin } from "../src/lib/sandbox-python";
+import { encodeSession } from "../src/lib/auth";
 import { closeDb, python, resetDb, seedRepo } from "./support";
 
 const KEY = { "X-Rewind-Key": "test-key" };
@@ -73,6 +74,7 @@ test("create session, run, inspect, stream", async () => {
   const b = await waitDone(root);
   assert.equal(b.status, "done", JSON.stringify(b));
   assert.equal(b.step_count, 8);
+  assert.equal(b.stop_reason, "completed");
   assert.equal(b.total_input_tokens, 500);
   const steps = (await get(`/api/branches/${root}/steps`)).data as Array<Record<string, unknown>>;
   assert.deepEqual(steps.map((s) => s.kind), ["user", "assistant", "tool_call", "tool_result", "assistant", "tool_call", "tool_result", "assistant"]);
@@ -195,8 +197,10 @@ test("loop detection", async () => {
   setClient({ complete: async (_m, messages) => ({ message: { role: "assistant", content: null, tool_calls: [{ id: `c${messages.length}`, type: "function", function: { name: "run", arguments: JSON.stringify({ command: "test" }) } }] }, inputTokens: 10, outputTokens: 1 }) });
   const r = await newSession("loop");
   const b = await waitDone(r.data.root_branch_id);
-  assert.equal(b.status, "failed"); assert.match(b.error, /stuck in a loop/);
-  const results = ((await get(`/api/branches/${b.id}/steps`)).data as Array<{ kind: string; tool_result: string }>).filter((s) => s.kind === "tool_result");
+  assert.equal(b.status, "done"); assert.equal(b.stop_reason, "loop"); assert.match(b.error, /same arguments/);
+  const all = (await get(`/api/branches/${b.id}/steps`)).data as Array<{ kind: string; tool_result: string; content: { content?: string } }>;
+  assert.ok(all.some((s) => s.kind === "user" && /This run is stopping/.test(s.content.content ?? "")));
+  const results = all.filter((s) => s.kind === "tool_result");
   // the test command fails every time, so the branch ends one attempt early
   assert.equal(results.length, settings.loopFailAfter - 1);
   assert.ok(results.some((r) => /\[rewind\].*failed each time/.test(r.tool_result)));
@@ -282,16 +286,48 @@ test("public cheap-model writes", async () => {
   assert.equal((await get("/api/stats")).data.public_writes, "cheap");
 });
 
+test("signed-in mode: GitHub session unlocks cheap-model writes with a shorter run", async () => {
+  settings.publicWrites = "signed_in";
+  settings.sessionSecret = "test-session-secret";
+  const body = { repo_id: repoId, title: "t", task_prompt: "x", model_id: cheapestModel().id };
+  let r = await j("POST", "/api/sessions", body, {});
+  assert.equal(r.status, 401); assert.equal(r.data.sign_in, true);
+  const cookie = `rewind_session=${encodeSession({ id: "42", login: "octocat", avatar: null })}`;
+  const me = await fetch(`${base}/api/auth/me`, { headers: { Cookie: cookie } }).then((x) => x.json());
+  assert.equal((me as { login: string }).login, "octocat");
+  assert.equal((await j("GET", "/api/auth/me", undefined, { Cookie: "rewind_session=tampered.sig" })).data, null);
+  r = await j("POST", "/api/sessions", body, { Cookie: cookie });
+  assert.equal(r.status, 201, JSON.stringify(r.data));
+  assert.equal((await j("POST", "/api/sessions", { ...body, model_id: "anthropic/claude-sonnet-5" }, { Cookie: cookie })).status, 401);
+  const done = await waitDone(r.data.root_branch_id);
+  assert.equal(done.status, "done");
+  // a public branch is capped at PUBLIC_MAX_MODEL_CALLS; the last call is a tool-less wrap-up and the branch ends done
+  settings.publicMaxModelCalls = 2;
+  r = await j("POST", "/api/sessions", body, { Cookie: cookie });
+  const capped = await waitDone(r.data.root_branch_id);
+  assert.equal(capped.status, "done"); assert.equal(capped.stop_reason, "call_limit"); assert.match(capped.error, /2-call limit/);
+  const cappedSteps = (await get(`/api/branches/${capped.id}/steps`)).data as Array<{ kind: string; content: { content?: string } }>;
+  assert.ok(cappedSteps.some((s) => s.kind === "user" && /This run is stopping/.test(s.content.content ?? "")));
+  assert.equal(cappedSteps.filter((s) => s.kind === "assistant").length, 2);
+  settings.publicMaxModelCalls = 20;
+  settings.publicWrites = "cheap";
+});
+
 test("a fork before the parent's first commit starts from the base repo, not the parent's HEAD", async () => {
   const r = await newSession();
   const root = r.data.root_branch_id as string;
   await waitDone(root);
+  // step 1 is the first assistant turn; no commit exists at or before it
   const f = await j("POST", `/api/branches/${root}/fork`, { step_index: 1, model_id: cheapestModel().id, edited_task_prompt: "again" }, KEY);
   assert.equal(f.status, 201, JSON.stringify(f.data));
   const fid = f.data.branches[0].id as string;
-  assert.equal((await waitDone(fid)).status, "done");
+  const done = await waitDone(fid);
+  assert.equal(done.status, "done", JSON.stringify(done));
   const files0 = (await get(`/api/branches/${fid}/steps/1/files`)).data;
   assert.ok(!files0.files.some((x: { path: string }) => x.path === "OUT.md"), "parent's OUT.md must not exist at the fork point");
+  const steps = (await get(`/api/branches/${fid}/steps`)).data as Array<{ kind: string; tool_name: string | null; commit_hash: string | null }>;
+  const firstWrite = steps.find((s) => s.kind === "tool_result" && s.tool_name === "write_file");
+  assert.ok(firstWrite?.commit_hash, "the fork wrote OUT.md itself");
 });
 
 test("fake client sanity", () => { assert.ok(new FakeModelClient([])); });

@@ -21,36 +21,50 @@ export default function Home() {
   const search = useQuery({ queryKey: ['search', submitted], queryFn: () => api.search(submitted), enabled: submitted.length >= 2 })
   const key = useAuth((s) => s.key)
   const stats = useQuery({ queryKey: ['stats'], queryFn: api.stats })
-  const publicMode = !key && stats.data?.public_writes === 'cheap'
+  const publicMode = !key && (stats.data?.public_writes === 'cheap' || (stats.data?.public_writes === 'signed_in' && !!stats.data?.me))
+  const signedInMode = stats.data?.public_writes === 'signed_in'
+  const readOnly = stats.data?.read_only === true
   // the session with the most branches is the best first thing to open
   const featured = q.data && q.data.length ? [...q.data].sort((a, b) => b.branch_count - a.branch_count)[0] : undefined
   return (
     <div className="flex h-full flex-col">
       <TopBar>
-        <span className="text-[13px] text-muted">Sessions</span>
-        <form className="flex items-center gap-1 ml-2" onSubmit={(e) => { e.preventDefault(); setSubmitted(query.trim()) }}>
-          <input className="field w-64 py-1" placeholder="Search tool output, arguments, notes" value={query} onChange={(e) => setQuery(e.target.value)} />
+        <span className="text-[13px] text-muted hidden sm:inline">Sessions</span>
+        <form className="flex items-center gap-1 sm:ml-2 min-w-0 flex-1 sm:flex-none" onSubmit={(e) => { e.preventDefault(); setSubmitted(query.trim()) }}>
+          <input className="field w-full sm:w-64 py-1" placeholder="Search runs" value={query} onChange={(e) => setQuery(e.target.value)} />
           {submitted && <button type="button" className="btn" onClick={() => { setQuery(''); setSubmitted('') }}>Clear</button>}
         </form>
         <span className="ml-auto flex items-center gap-2">
-          {key && <span className="text-[11px] text-faint">key entered</span>}
-          <button className="btn btn-accent" onClick={() => setCreating((c) => !c)}>{key || publicMode ? 'New session' : 'Enter access key'}</button>
+          {readOnly ? null : (
+            <>
+              {key && <span className="text-[11px] text-faint">key entered</span>}
+              <button className="btn btn-accent" onClick={() => setCreating((c) => !c)}>{key || publicMode || signedInMode ? 'New session' : 'Enter access key'}</button>
+            </>
+          )}
         </span>
       </TopBar>
       <div className="min-h-0 flex-1 overflow-auto">
-        <div className="mx-auto max-w-[820px] p-4 space-y-3">
+        <div className="mx-auto max-w-[820px] p-3 sm:p-4 space-y-3">
           <section className="border border-line bg-panel px-5 py-4 space-y-2">
-            <p className="text-[15px] text-ink">Rewind records a coding agent step by step, so you can scrub back to any moment, see exactly what the model saw, and fork from there.</p>
+            <p className="text-[15px] text-ink">Rewind records a coding agent step by step, so you can scrub back to any moment, see exactly what the model saw, and {readOnly ? 'compare the branches that forked from there' : 'fork from there'}.</p>
             <p className="text-[13px] text-muted">
-              Open a session, drag the scrubber, press <kbd>C</kbd> for the model's context, then <kbd>F</kbd> to fork it with another model or prompt and watch both runs side by side.
-              Under a branch with forks, "compare" lines them up and marks where they diverged.
+              Open a session, drag the scrubber, press <kbd>C</kbd> for the model's context{readOnly ? '.' : <>, then <kbd>F</kbd> to fork it with another model or prompt and watch both runs side by side.</>}
+              {' '}Under a branch with forks, "compare" lines them up and marks where they diverged; shift-click two branches to diff their code.
+              {readOnly && ' The runs below were recorded with cheap models and cannot be changed.'}
             </p>
+            {readOnly && (
+              <p className="text-[13px] text-muted border-t border-line pt-2">
+                Starting new sessions and forks is switched off in this proof of concept to keep token costs down. In an IDE this would be the live path: the agent runs, every step is recorded, and you fork from wherever it went wrong.
+                To try that, <a className="text-accent hover:underline" href="https://github.com/krishivseth/Rewind-poc" target="_blank" rel="noreferrer">run the project locally from GitHub</a> with your own OpenRouter key and start sessions against any of the models.
+              </p>
+            )}
             <p className="text-[13px] text-muted flex flex-wrap items-center gap-x-3 gap-y-1">
               {featured && <Link to={`/sessions/${featured.id}`} className="btn btn-accent">Start here: {featured.title}</Link>}
-              {publicMode && <span>Visitors can start sessions and forks on {stats.data?.cheap_model?.split('/').pop()} without a key.</span>}
+              {publicMode && !readOnly && <span>Visitors can start sessions and forks on {stats.data?.cheap_model?.split('/').pop()} without a key.</span>}
+              {signedInMode && !publicMode && !readOnly && <span>Sign in with GitHub to fork any run on {stats.data?.cheap_model?.split('/').pop()}, within a small shared daily budget.</span>}
             </p>
           </section>
-          {creating && <NewSessionForm onClose={() => setCreating(false)} />}
+          {creating && !readOnly && <NewSessionForm onClose={() => setCreating(false)} />}
           {submitted.length >= 2 && (
             <div className="border border-line rounded bg-panel">
               <div className="pane-title">
@@ -96,7 +110,7 @@ export default function Home() {
               const live = s.branches.filter((b) => isLive(b.status)).length
               return (
                 <li key={s.id} className="relative">
-                  <Link to={`/sessions/${s.id}`} className="grid grid-cols-[1fr_auto] items-center gap-6 border border-line rounded bg-panel px-4 py-3 hover:border-muted">
+                  <Link to={`/sessions/${s.id}`} className="grid grid-cols-1 sm:grid-cols-[1fr_auto] items-center gap-3 sm:gap-6 border border-line rounded bg-panel px-4 py-3 hover:border-muted">
                     <div className="min-w-0 space-y-1">
                       <div className="text-[14px] text-ink truncate" title={s.title}>{s.title}</div>
                       <div className="mono text-[11px] text-muted flex gap-4">
@@ -107,11 +121,12 @@ export default function Home() {
                         <span className="text-faint">{new Date(s.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
                       </div>
                     </div>
-                    <TreeSketch branches={s.branches} width={240} />
+                    <div className="hidden sm:block"><TreeSketch branches={s.branches} width={240} /></div>
+                    <div className="sm:hidden"><TreeSketch branches={s.branches} width={200} /></div>
                   </Link>
                   {/* sibling of the link, not a child: buttons inside anchors are invalid and click-through prone */}
                   <div className="absolute right-4 bottom-3 flex items-center">
-                    <DeleteSession sessionId={s.id} branchCount={s.branch_count} compact onDone={() => void q.refetch()} />
+                    {!readOnly && <DeleteSession sessionId={s.id} branchCount={s.branch_count} compact onDone={() => void q.refetch()} />}
                   </div>
                 </li>
               )

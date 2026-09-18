@@ -6,7 +6,7 @@ const FileViewer = lazy(() => import('../components/FileViewer'))
 const DiffView = lazy(() => import('../components/DiffView'))
 const CompareView = lazy(() => import('../components/CompareView'))
 import { useParams, useSearchParams } from 'react-router-dom'
-import { api, isLive } from '../api'
+import { api, isLive, type Branch } from '../api'
 import BranchTree from '../components/BranchTree'
 import DeleteSession from '../components/DeleteSession'
 import { resolveStep } from '../lib/compare'
@@ -19,7 +19,7 @@ import FileTree from '../components/FileTree'
 import Scrubber from '../components/Scrubber'
 import StepCard from '../components/StepCard'
 import TopBar from '../components/TopBar'
-import { fmtCost, fmtTokens, shortModel } from '../lib/steps'
+import { STOP_LABEL, fmtCost, fmtTokens, isSoftStop, shortModel } from '../lib/steps'
 import { useSelection } from '../store'
 
 export default function SessionPage() {
@@ -30,6 +30,8 @@ export default function SessionPage() {
   const dismissHint = () => { setHintDismissed(true); try { localStorage.setItem('rewind.hint', '1') } catch { /* private mode */ } }
   const [file, setFile] = useState<string | null>(null)
   const [fileDiff, setFileDiff] = useState(false)
+  // phones show one pane at a time; md and up show all three side by side
+  const [mobilePane, setMobilePane] = useState<'steps' | 'files' | 'branches'>('steps')
   const [params, setParams] = useSearchParams()
   const [rightWidth, setRightWidth] = useState<number>(() => { try { return Number(localStorage.getItem('rewind.rightPane')) || 0 } catch { return 0 } })
   const [viewport, setViewport] = useState(() => window.innerWidth)
@@ -77,8 +79,15 @@ export default function SessionPage() {
   const live = !!branch && isLive(branch.status)
   useSessionEvents(session?.id, branches)
   const key = useAuth((s) => s.key)
+  const statsQ = useQuery({ queryKey: ['stats'], queryFn: api.stats })
+  const readOnly = statsQ.data?.read_only === true
   const qc = useQueryClient()
   const cancel = useMutation({ mutationFn: (id: string) => api.cancel(id), onSuccess: () => qc.invalidateQueries({ queryKey: ['session', id] }) })
+  // a soft stop is a pause: continuing is a fork from the last step with the same model
+  const cont = useMutation({
+    mutationFn: (b: Branch) => api.fork(b.id, { step_index: Math.max(0, b.step_count - 1), model_id: b.model_id, count: 1 }),
+    onSuccess: async (res) => { await qc.invalidateQueries({ queryKey: ['session', id] }); if (res.branches[0]) sel.selectBranch(res.branches[0].id) },
+  })
   const other = sel.diffMode && sel.diffOther ? branches.find((b) => b.id === sel.diffOther) ?? null : null
 
   const stepsQ = useQuery({
@@ -109,6 +118,7 @@ export default function SessionPage() {
   }, [lastIndex, live, sel])
 
   const compareParent = sel.compareParent ? branches.find((b) => b.id === sel.compareParent) ?? null : null
+  useEffect(() => { if (sel.diffMode || sel.compareParent) setMobilePane('steps') }, [sel.diffMode, sel.compareParent])
   const compareForks = compareParent ? branches.filter((b) => b.parent_branch_id === compareParent.id).sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id)) : []
 
   // resizable right pane
@@ -135,7 +145,7 @@ export default function SessionPage() {
         case 'ArrowRight': e.preventDefault(); setStep(index + 1); break
         case 'Home': e.preventDefault(); setStep(0); break
         case 'End': e.preventDefault(); sel.setStep(null); break
-        case 'f': case 'F': sel.setForkOpen(!sel.forkOpen); break
+        case 'f': case 'F': if (!readOnly) sel.setForkOpen(!sel.forkOpen); break
         case 'd': case 'D': sel.setDiffMode(!sel.diffMode); break
         case 'c': case 'C': sel.setContextOpen(!sel.contextOpen); break
         case 'Escape': if (sel.compareParent) sel.setCompareParent(null); break
@@ -143,7 +153,7 @@ export default function SessionPage() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [index, setStep, sel])
+  }, [index, setStep, sel, readOnly])
 
   const changedHere = useMemo(() => !!file && !!step && step.files_changed.includes(file), [file, step])
 
@@ -152,10 +162,10 @@ export default function SessionPage() {
 
   return (
     <Shell title={session.title} subtitle={session.repo_slug} branch={branch ? `${shortModel(branch.model_id)}   ${fmtTokens(branch.total_input_tokens + branch.total_output_tokens)} tokens${branch.est_cost_usd ? `   ${fmtCost(branch.est_cost_usd)}` : ''}` : undefined}
-      extra={<DeleteSession sessionId={session.id} branchCount={branches.length} compact />}>
+      extra={readOnly ? undefined : <DeleteSession sessionId={session.id} branchCount={branches.length} compact />}>
       <div className="flex min-h-0 flex-1 flex-col md:flex-row">
         {/* left: branches */}
-        <aside className="md:w-[240px] shrink-0 border-b md:border-b-0 md:border-r border-line bg-panel flex flex-col max-h-[30vh] md:max-h-none">
+        <aside className={`md:w-[240px] shrink-0 md:border-r border-line bg-panel flex-col min-h-0 flex-1 md:flex-none ${mobilePane === 'branches' ? 'flex' : 'hidden md:flex'}`}>
           <div className="pane-title">Branches <span className="text-faint">{branches.length}</span></div>
           <div className="min-h-0 flex-1 overflow-auto">
             <BranchTree branches={branches} selected={sel.branchId} diffOther={sel.diffOther} onSelect={sel.selectBranch} onShiftSelect={sel.toggleDiffWith}
@@ -164,14 +174,14 @@ export default function SessionPage() {
         </aside>
 
         {/* center: scrubber + step */}
-        <main className="relative flex min-h-0 min-w-0 flex-1 flex-col border-b md:border-b-0 md:border-r border-line">
+        <main className={`relative min-h-0 min-w-0 flex-1 flex-col md:border-r border-line ${mobilePane === 'steps' ? 'flex' : 'hidden md:flex'}`}>
           {branch && (
             <Scrubber
               steps={steps} index={Math.max(0, index)} forkStepIndex={branch.fork_step_index} live={live} onChange={setStep}
               actions={
                 <>
-                  <button className="btn btn-accent" disabled={steps.length === 0} onClick={() => sel.setForkOpen(!sel.forkOpen)} title="Fork from this step (F)">Fork here</button>
-                  {live && key && (
+                  {!readOnly && <button className="btn btn-accent" disabled={steps.length === 0} onClick={() => sel.setForkOpen(!sel.forkOpen)} title="Fork from this step (F)">Fork here</button>}
+                  {live && key && !readOnly && (
                     <button className="btn" disabled={cancel.isPending} onClick={() => cancel.mutate(branch.id)}>Cancel</button>
                   )}
                 </>
@@ -180,11 +190,11 @@ export default function SessionPage() {
           )}
           {!hintDismissed && branch && steps.length > 0 && (
             <div className="flex items-center gap-3 border-b border-line bg-accent-dim/40 px-4 py-1.5 text-[12px] text-ink">
-              <span>Drag the scrubber or use <kbd>←</kbd> <kbd>→</kbd>. <kbd>C</kbd> shows what the model saw. <kbd>F</kbd> forks from this step. Shift-click a second branch to diff.</span>
-              <button className="btn ml-auto" onClick={dismissHint}>Got it</button>
+              <span>Drag the scrubber or use <kbd>←</kbd> <kbd>→</kbd>. <kbd>C</kbd> shows what the model saw. {!readOnly && <><kbd>F</kbd> forks from this step. </>}Shift-click a second branch to diff.</span>
+              <button className="btn ml-auto whitespace-nowrap shrink-0" onClick={dismissHint}>Got it</button>
             </div>
           )}
-          {sel.forkOpen && branch && step && (
+          {sel.forkOpen && branch && step && !readOnly && (
             <ForkPopover branch={branch} stepIndex={step.index} onClose={() => sel.setForkOpen(false)} />
           )}
           {compareParent && compareForks.length > 1 ? (
@@ -203,8 +213,17 @@ export default function SessionPage() {
               {branch?.status === 'queued' ? 'Queued. Steps appear when the branch starts.' : stepsQ.isLoading ? 'Loading steps…' : 'No steps yet.'}
             </div>
           )}
-          {branch?.error && (
-            <div className="border-t border-line px-4 py-1.5 text-[11px] text-bad">{branch.status}: {branch.error}</div>
+          {branch && (branch.error || (branch.stop_reason && branch.stop_reason !== 'completed')) && (
+            <div className={`flex items-center gap-3 border-t border-line px-4 py-1.5 text-[11px] ${branch.status === 'failed' ? 'text-bad' : 'text-muted'}`}>
+              <span className="mono uppercase tracking-wider shrink-0">{STOP_LABEL[branch.stop_reason ?? ''] ?? branch.status}</span>
+              <span className="truncate">{branch.error}</span>
+              {isSoftStop(branch.stop_reason) && !readOnly && (statsQ.data?.writes === 'open') && (
+                <button className="btn btn-accent ml-auto shrink-0" disabled={cont.isPending}
+                  onClick={() => cont.mutate(branch)} title="Fork from the last step with the same model and keep going">
+                  {cont.isPending ? 'Continuing…' : 'Continue from here'}
+                </button>
+              )}
+            </div>
           )}
           {sel.contextOpen && branch && step && (
             <ContextDrawer branchId={branch.id} index={step.index} onClose={() => sel.setContextOpen(false)} />
@@ -217,11 +236,11 @@ export default function SessionPage() {
           onPointerDown={startResize} title="Drag to resize" role="separator" aria-orientation="vertical"
         />
         <aside
-          className={`shrink-0 flex flex-col bg-panel min-h-[40vh] md:min-h-0 ${(sel.diffMode && other) || compareParent ? 'hidden' : ''} ${effectiveRight ? '' : 'md:w-[44%] xl:w-[46%]'}`}
+          className={`shrink-0 flex-col bg-panel min-h-0 flex-1 md:flex-none ${(sel.diffMode && other) || compareParent ? 'hidden' : mobilePane === 'files' ? 'flex' : 'hidden md:flex'} ${effectiveRight ? '' : 'md:w-[44%] xl:w-[46%]'}`}
           style={effectiveRight ? { width: effectiveRight } : undefined}
         >
           <div className="flex min-h-0 flex-1 flex-col md:flex-row">
-            <div className="md:w-[190px] shrink-0 border-b md:border-b-0 md:border-r border-line flex flex-col max-h-[30vh] md:max-h-none">
+            <div className="md:w-[190px] shrink-0 border-b md:border-b-0 md:border-r border-line flex flex-col max-h-[35vh] md:max-h-none">
               <div className="pane-title">Files {filesQ.data && <span className="mono text-faint">{filesQ.data.commit.slice(0, 8)}</span>}</div>
               <div className="min-h-0 flex-1 overflow-auto">
                 {filesQ.data && <FileTree files={filesQ.data.files} selected={file} onSelect={setFile} />}
@@ -237,6 +256,11 @@ export default function SessionPage() {
           </div>
         </aside>
       </div>
+      <nav className="md:hidden flex shrink-0 border-t border-line bg-panel" aria-label="Pane">
+        {([['steps', 'Steps'], ['files', 'Files'], ['branches', `Branches (${branches.length})`]] as const).map(([id, label]) => (
+          <button key={id} className={`flex-1 py-2.5 mono text-[11px] uppercase tracking-wider ${mobilePane === id ? 'text-accent border-t-2 border-accent -mt-px' : 'text-muted'}`} onClick={() => setMobilePane(id)}>{label}</button>
+        ))}
+      </nav>
     </Shell>
   )
 }
@@ -245,8 +269,8 @@ function Shell({ title, subtitle, branch, extra, children }: { title: string; su
   return (
     <div className="flex h-full flex-col">
       <TopBar>
-        <span className="text-[13px] text-ink truncate">{title}</span>
-        {subtitle && <span className="mono text-[11px] text-muted">{subtitle}</span>}
+        <span className="text-[13px] text-ink truncate min-w-0">{title}</span>
+        {subtitle && <span className="mono text-[11px] text-muted hidden sm:inline">{subtitle}</span>}
         <span className="ml-auto flex items-center gap-3">
           {branch && <span className="mono text-[11px] text-faint hidden md:inline whitespace-pre">{branch}</span>}
           {extra}

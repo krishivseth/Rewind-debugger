@@ -1,14 +1,20 @@
 # Rewind
 
+> Deployed on Replit (this repository) and on Railway from the sibling
+> [Rewind-poc](https://github.com/krishivseth/Rewind-poc), which is the same code.
+
 Rewind is a time-travel debugger for coding-agent sessions. It records every step an agent takes on
 a repository, lets you scrub back to any step and see the exact repository state and the exact
 messages the model saw, fork from that step with a different model or an edited prompt, watch the
 branches run side by side, diff any two of them, and line up every fork of a branch to find where
 they diverged.
 
-It runs three ways from the same code: locally with `pnpm`, in Docker on any VPS, or on Replit as
-the submission target. One long-running Node process serves the API, the live event streams, the
-agent workers and the built frontend.
+**Live:** https://rewind-production-a902.up.railway.app
+
+It runs three ways from the same code: locally with `pnpm`, in Docker on any host, or on Replit.
+The link above is the Docker image on Railway with a Postgres service and a persistent volume.
+One long-running Node process serves the API, the live event streams, the agent workers and the
+built frontend.
 
 - [Two-minute tour](#two-minute-tour)
 - [Quick start (local)](#quick-start-local)
@@ -193,7 +199,11 @@ Keyboard: `←` `→` step, `Home` `End` jump, `F` fork, `D` diff mode, `C` cont
 | `PRIVATE_OBJECT_DIR` | | Set by Replit App Storage; bundles go to the bucket instead of disk |
 | `PORT` | `8080` | API server port |
 | `REWIND_READ_ONLY` | `0` | `1` refuses every write; leave a deployment public without spending credits |
-| `REWIND_PUBLIC_WRITES` | `cheap` | `cheap`: visitors may run the cheap model without a key; `off`: every write needs the key |
+| `REWIND_PUBLIC_WRITES` | `cheap` | `cheap`: anyone may run the cheap model; `signed_in`: only GitHub-signed-in visitors may; `off`: every write needs the key |
+| `PUBLIC_MAX_MODEL_CALLS` | 15 | Model-call cap for keyless (public or signed-in) branches; the key gets `MAX_MODEL_CALLS` |
+| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | | GitHub OAuth app for sign-in. Register `https://<host>/api/auth/github/callback` for every host that serves the app, including `http://localhost:5173` for `pnpm dev` and `http://localhost:8080` for `pnpm start` |
+| `SESSION_SECRET` | | HMAC key for the session cookie; any long random string |
+| `PUBLIC_URL` | | Override the origin used for the OAuth callback when the app sits behind a proxy that rewrites Host |
 | `PUBLIC_DAILY_TOKEN_CAP` | 500000 | Tokens per UTC day that keyless writes may spend before they are refused |
 | `SANDBOX_PYTHON` | | Python to build the sandbox venv from, if `python3` is not the one you want |
 | `TRUST_PROXY_HOPS` | `1` | Proxy hops to trust for the client IP used by the rate limit |
